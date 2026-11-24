@@ -27,7 +27,12 @@ service cloud.firestore {
 
     match /incidents/{incidentId} {
       allow read: if signedIn();
-      allow create: if signedIn() && request.resource.data.reporterId == request.auth.uid;
+      allow create: if signedIn() && (
+        request.resource.data.reporterId == request.auth.uid ||
+        // An anonymous report deliberately stores no uid, so it can never be
+        // edited or deleted through this path - only withdrawn with its code.
+        (request.resource.data.isAnonymous == true &&
+          request.resource.data.reporterId == ''));
       allow update: if signedIn() &&
         ((isResponder() || isAdmin()) &&
           request.resource.data.diff(resource.data).affectedKeys()
@@ -127,6 +132,21 @@ service cloud.firestore {
     match /ai_classification_log/{logId} {
       allow read: if isAdmin();
       allow create, update, delete: if false;   // written by Cloud Functions
+    }
+
+    // Capability store for anonymous reports. The document id is the SHA-256
+    // digest of the reporter's withdrawal code, so this collection is
+    // unreadable in practice without already holding the code (128 bits of
+    // entropy). Nothing here links a report to the account that filed it.
+    match /report_access/{tokenId} {
+      allow get: if true;                       // the id *is* the secret
+      allow list: if false;                     // no enumeration
+      allow create: if signedIn() &&
+        request.resource.data.keys().hasOnly(['incidentId', 'createdAt']) &&
+        request.resource.data.incidentId is string &&
+        // A capability can only ever be minted for a live anonymous report.
+        get(/databases/$(database)/documents/incidents/$(request.resource.data.incidentId)).data.isAnonymous == true;
+      allow update, delete: if false;           // withdrawal goes through the callable
     }
 
     match /{document=**} {

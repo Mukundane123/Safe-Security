@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 
 import '../../config/app_config.dart';
 import '../../models/incident.dart';
+import '../../models/withdrawal_code.dart';
 import '../../repositories/repository.dart';
 import '../../repositories/repository_exception.dart';
 import '../../services/location_service.dart';
@@ -35,6 +36,7 @@ class _ReportIncidentScreenState extends State<ReportIncidentScreen> {
   bool _submitting = false;
   final List<String> _photos = [];
   String? _voiceNotePath;
+  bool _anonymous = false;
   int _offlinePending = 0;
 
   @override
@@ -128,10 +130,17 @@ class _ReportIncidentScreenState extends State<ReportIncidentScreen> {
         locationLabel: label,
         photoPaths: _photos,
         voiceNotePath: _voiceNotePath,
+        isAnonymous: _anonymous,
       );
       if (!mounted) return;
       setState(() => _submitting = false);
-      await _showConfirmation(incident);
+      // Issued only for anonymous reports; the code is shown once and never
+      // stored, so it must reach the user before this call returns.
+      final code = _anonymous
+          ? await repo.issueReportWithdrawalCode(incidentId: incident.incidentId)
+          : null;
+      if (!mounted) return;
+      await _showConfirmation(incident, code);
     } catch (e) {
       if (!mounted) return;
       final error = RepositoryException.messageOf(e);
@@ -164,7 +173,45 @@ class _ReportIncidentScreenState extends State<ReportIncidentScreen> {
     }
   }
 
-  Future<void> _showConfirmation(Incident incident) async {
+  Widget _anonymityToggle() {
+    return Card(
+      child: Column(
+        children: [
+          SwitchListTile(
+            value: _anonymous,
+            onChanged: (v) => setState(() => _anonymous = v),
+            secondary: const Icon(Icons.visibility_off_outlined,
+                color: AppColors.primary),
+            title: const Text('Report anonymously'),
+            subtitle: const Text(
+                'Your name and account are not attached to this report. '
+                'You get a code to follow or withdraw it.'),
+          ),
+          if (_anonymous)
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.info_outline, size: 16, color: AppColors.muted),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'An anonymous report cannot be edited from your account, '
+                      'and only the withdrawal code can open it. Write down the '
+                      'code - it cannot be recovered.',
+                      style: TextStyle(fontSize: 12, color: AppColors.muted),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showConfirmation(Incident incident, WithdrawalCode? code) async {
     final repo = context.read<IRepository>();
     await showDialog<void>(
       context: context,
@@ -172,30 +219,69 @@ class _ReportIncidentScreenState extends State<ReportIncidentScreen> {
       builder: (dialogContext) => AlertDialog(
         icon: const Icon(Icons.check_circle, color: Colors.green, size: 48),
         title: const Text('Incident reported'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              'Your reference number is\n${incident.incidentId.toUpperCase()}.',
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 12),
-            if (!repo.isDemo)
-              const Text(
-                'An AI classifier is reviewing your report and responders have '
-                'been notified.',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 13),
-              )
-            else
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
               Text(
-                'The system classified your report as\n'
-                '${incident.category.label} (${incident.priority.label} priority). '
-                'Responders have been notified.',
+                'Your reference number is\n${incident.incidentId.toUpperCase()}.',
                 textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 13),
               ),
-          ],
+              if (code != null) ...[
+                const SizedBox(height: 16),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: AppColors.primary.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                        color: AppColors.primary.withValues(alpha: 0.4)),
+                  ),
+                  child: Column(
+                    children: [
+                      const Text('Withdrawal code',
+                          style: TextStyle(
+                              fontSize: 12, fontWeight: FontWeight.w700)),
+                      const SizedBox(height: 6),
+                      Text(
+                        code.code,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 2,
+                          fontFamily: 'monospace',
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      const Text(
+                        'Write this down now. It is the only way to open, follow '
+                        'or withdraw this anonymous report.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(fontSize: 11),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              const SizedBox(height: 12),
+              if (!repo.isDemo)
+                const Text(
+                  'An AI classifier is reviewing your report and responders have '
+                  'been notified.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 13),
+                )
+              else
+                Text(
+                  'The system classified your report as\n'
+                  '${incident.category.label} (${incident.priority.label} priority). '
+                  'Responders have been notified.',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 13),
+                ),
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -251,6 +337,8 @@ class _ReportIncidentScreenState extends State<ReportIncidentScreen> {
                     ),
                     const SizedBox(height: 16),
                     _locationTile(),
+                    const SizedBox(height: 16),
+                    _anonymityToggle(),
                     const SizedBox(height: 16),
                     _photoSection(),
                     const SizedBox(height: 16),

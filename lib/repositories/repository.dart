@@ -14,6 +14,7 @@ import '../models/safety_zone.dart';
 import '../models/sos_alert.dart';
 import '../models/sos_location.dart';
 import '../models/trusted_contact.dart';
+import '../models/withdrawal_code.dart';
 
 /// Unified data-access interface used by every controller.
 ///
@@ -93,6 +94,25 @@ abstract class IRepository {
   Future<void> updateIncidentDescription({
     required String incidentId,
     required String description,
+  });
+
+  // ---- Anonymous reporting ----
+  /// Issues the one-time capability for an anonymous report. The plain code is
+  /// returned for display only; callers must show it to the reporter and never
+  /// store it.
+  Future<WithdrawalCode> issueReportWithdrawalCode({
+    required String incidentId,
+  });
+
+  /// Resolves a withdrawal code to its report, or null when the code is
+  /// unknown or expired.
+  Future<Incident?> findIncidentByWithdrawalCode(String code);
+
+  /// Withdraws an anonymous report using only the code. Nothing links this
+  /// action to the account that created it.
+  Future<void> withdrawAnonymousReport({
+    required String code,
+    required String incidentId,
   });
 
   // ---- Incident audit log / timeline ----

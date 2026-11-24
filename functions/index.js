@@ -12,6 +12,8 @@
  *  - onNotificationResend    : re-attempts delivery for a notification the
  *                              user asked the app to retry.
  *  - onIncidentReviewed      : flags an AI audit entry as overridden by a human.
+ *  - withdrawAnonymousReport : deletes an anonymous report when the reporter
+ *                              proves ownership with their withdrawal code.
  *
  * Delivery status: every notification is written as `pending`, then marked
  * `delivered` or `failed` once the push is attempted, so the app can tell the
@@ -643,6 +645,57 @@ exports.onNotificationResend = functions.firestore
       deliveredAt: ok ? admin.firestore.FieldValue.serverTimestamp() : null,
       resendRequestedAt: null,
     });
+  });
+
+/**
+ * Withdraws an anonymous report using only the reporter's withdrawal code.
+ *
+ * Firestore rules cannot verify a hash against a code the client never sends,
+ * so the check has to live here. The code is compared by digest; the account
+ * making the call is never written to the report, so withdrawing does not
+ * de-anonymise anything.
+ */
+const crypto = require('crypto');
+
+const tokenFor = (code) =>
+  crypto.createHash('sha256').update(String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '')).digest('hex');
+
+exports.withdrawAnonymousReport = functions
+  .region(REGION)
+  .https.onCall(async (data) => {
+    const code = data && data.code;
+    const incidentId = data && data.incidentId;
+    if (typeof code !== 'string' || code.trim().length === 0) {
+      throw new functions.https.HttpsError('invalid-argument', 'A withdrawal code is required.');
+    }
+    if (typeof incidentId !== 'string' || incidentId.length === 0) {
+      throw new functions.https.HttpsError('invalid-argument', 'A report reference is required.');
+    }
+
+    const accessRef = db.collection('report_access').doc(tokenFor(code));
+    const access = await accessRef.get();
+    if (!access.exists || access.data().incidentId !== incidentId) {
+      // Deliberately vague: a wrong code must not confirm the report exists.
+      throw new functions.https.HttpsError('not-found', 'That code does not match this report.');
+    }
+
+    const incidentRef = db.collection('incidents').doc(incidentId);
+    const incident = await incidentRef.get();
+    if (!incident.exists) {
+      await accessRef.delete();
+      throw new functions.https.HttpsError('not-found', 'That report has already been withdrawn.');
+    }
+    if (incident.data().isAnonymous !== true) {
+      throw new functions.https.HttpsError('failed-precondition', 'Only anonymous reports can be withdrawn with a code.');
+    }
+    if (incident.data().status !== 'pending') {
+      throw new functions.https.HttpsError('failed-precondition', 'This report is already being handled and can no longer be withdrawn.');
+    }
+
+    await incidentRef.delete();
+    await accessRef.delete();
+    console.log(`anonymous report ${incidentId} withdrawn with its code`);
+    return { withdrawn: true };
   });
 
 exports.REGION = REGION;

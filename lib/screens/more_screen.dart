@@ -12,6 +12,7 @@ import 'admin/admin_users_screen.dart';
 import 'admin/ai_audit_log_screen.dart';
 import 'citizen/check_in_screen.dart';
 import 'citizen/safety_zones_screen.dart';
+import 'citizen/track_report_screen.dart';
 import 'community_alerts_screen.dart';
 import 'emergency_resources_screen.dart';
 import 'my_reports_screen.dart';
@@ -49,6 +50,13 @@ class MoreScreen extends StatelessWidget {
           'My reports',
           () => Navigator.of(context)
               .push(MaterialPageRoute(builder: (_) => const MyReportsScreen())),
+        ),
+      if (user.role == UserRole.citizen)
+        _MenuItem(
+          Icons.vpn_key_outlined,
+          'Track anonymous report',
+          () => Navigator.of(context)
+              .push(MaterialPageRoute(builder: (_) => const TrackReportScreen())),
         ),
       if (user.role == UserRole.citizen)
         _MenuItem(

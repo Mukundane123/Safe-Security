@@ -16,8 +16,21 @@ import '../models/safety_zone.dart';
 import '../models/sos_alert.dart';
 import '../models/sos_location.dart';
 import '../models/trusted_contact.dart';
+import '../models/withdrawal_code.dart';
 import 'repository.dart';
 import 'repository_exception.dart';
+
+/// In-memory stand-in for a `report_access` document.
+class _DemoWithdrawal {
+  final String incidentId;
+  final String code;
+  final DateTime createdAt;
+  const _DemoWithdrawal({
+    required this.incidentId,
+    required this.code,
+    required this.createdAt,
+  });
+}
 
 /// In-memory implementation used when no Firebase project is configured.
 class DemoRepository extends IRepository {
@@ -39,6 +52,7 @@ class DemoRepository extends IRepository {
   final List<EmergencyResource> _resources = [];
   final Map<String, String> _passwords = {};
   final Map<String, String> _pendingOtps = {};
+  final Map<String, _DemoWithdrawal> _withdrawalCodes = {};
   final Map<String, NotificationPreferences> _prefs = {};
   final Map<String, List<SosLocationUpdate>> _sosTrails = {};
 
@@ -622,7 +636,8 @@ class DemoRepository extends IRepository {
     }
     final incident = Incident(
       incidentId: 'inc_$_nextId',
-      reporterId: user.userId,
+      // Matches the live repository: an anonymous report carries no uid.
+      reporterId: isAnonymous ? '' : user.userId,
       reporterName: isAnonymous ? 'Anonymous resident' : user.name,
       category: IncidentCategory.fromValue(category),
       subCategory: subCategory,
@@ -707,6 +722,74 @@ class DemoRepository extends IRepository {
     }
     _incidents[idx] =
         _incidents[idx].copyWith(description: description, updatedDate: DateTime.now());
+    _emitIncidents();
+  }
+
+  @override
+  Future<WithdrawalCode> issueReportWithdrawalCode({required String incidentId}) async {
+    final incident = _incidents.where((i) => i.incidentId == incidentId).firstOrNull;
+    if (incident == null) {
+      throw const RepositoryException(
+        RepositoryErrorCode.notFound,
+        'That report no longer exists.',
+      );
+    }
+    if (!incident.isAnonymous) {
+      throw const RepositoryException(
+        RepositoryErrorCode.invalidInput,
+        'A withdrawal code is only issued for anonymous reports.',
+      );
+    }
+    // Reuse an existing code rather than orphaning the previous one. The map is
+    // keyed by digest, so the plain code is held on the entry - a concession
+    // only the in-memory demo can make, since the real store never keeps it.
+    final existing = _withdrawalCodes.values
+        .where((w) => w.incidentId == incidentId)
+        .firstOrNull;
+    if (existing != null) return WithdrawalCode.fromCode(existing.code);
+
+    final code = WithdrawalCode.generate();
+    _withdrawalCodes[code.token] = _DemoWithdrawal(
+      incidentId: incidentId,
+      code: code.code,
+      createdAt: DateTime.now(),
+    );
+    return code;
+  }
+
+  @override
+  Future<Incident?> findIncidentByWithdrawalCode(String code) async {
+    final token = WithdrawalCode.digest(code);
+    final entry = _withdrawalCodes[token];
+    if (entry == null) return null;
+    return _incidents.where((i) => i.incidentId == entry.incidentId).firstOrNull;
+  }
+
+  @override
+  Future<void> withdrawAnonymousReport({
+    required String code,
+    required String incidentId,
+  }) async {
+    final token = WithdrawalCode.digest(code);
+    final entry = _withdrawalCodes[token];
+    if (entry == null || entry.incidentId != incidentId) {
+      throw const RepositoryException(
+        RepositoryErrorCode.permission,
+        'That code does not match this report.',
+      );
+    }
+    // Mirrors the callable: once responders have the report it is no longer
+    // the reporter's to pull.
+    final incident =
+        _incidents.where((i) => i.incidentId == incidentId).firstOrNull;
+    if (incident == null || incident.status != IncidentStatus.pending) {
+      throw const RepositoryException(
+        RepositoryErrorCode.permission,
+        'This report is already being handled and can no longer be withdrawn.',
+      );
+    }
+    _withdrawalCodes.remove(token);
+    _incidents.removeWhere((i) => i.incidentId == incidentId);
     _emitIncidents();
   }
 

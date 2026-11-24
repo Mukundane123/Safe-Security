@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart' as cfn;
 import 'package:firebase_auth/firebase_auth.dart' as fb;
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_storage/firebase_storage.dart';
@@ -24,6 +25,7 @@ import '../models/safety_zone.dart';
 import '../models/sos_alert.dart';
 import '../models/sos_location.dart';
 import '../models/trusted_contact.dart';
+import '../models/withdrawal_code.dart';
 import 'repository.dart';
 import 'repository_exception.dart';
 
@@ -34,6 +36,7 @@ class FirebaseRepository extends IRepository {
   final fb.FirebaseAuth fbAuth;
   final FirebaseFirestore db;
   final FirebaseStorage storage;
+  final cfn.FirebaseFunctions _functions;
 
   AppUser? _currentUser;
   final _authCtrl = StreamController<AppUser?>.broadcast();
@@ -46,9 +49,11 @@ class FirebaseRepository extends IRepository {
     fb.FirebaseAuth? auth,
     FirebaseFirestore? firestore,
     FirebaseStorage? storage,
+    cfn.FirebaseFunctions? functions,
   })  : fbAuth = auth ?? fb.FirebaseAuth.instanceFor(app: app),
         db = firestore ?? FirebaseFirestore.instanceFor(app: app),
-        storage = storage ?? FirebaseStorage.instanceFor(app: app) {
+        storage = storage ?? FirebaseStorage.instanceFor(app: app),
+        _functions = functions ?? cfn.FirebaseFunctions.instanceFor(app: app) {
     _authSub = fbAuth.authStateChanges().listen(_onAuthChanged);
   }
 
@@ -314,8 +319,13 @@ class FirebaseRepository extends IRepository {
     final doc = db.collection('incidents').doc();
     final incident = Incident(
       incidentId: doc.id,
-      reporterId: user.uid,
-      reporterName: user.displayName ?? (await _userName(user.uid)) ?? 'User',
+      // An anonymous report must not carry the reporter's uid: any responder
+      // reading the raw document could otherwise re-identify them. Ownership
+      // of an anonymous report is proven with a withdrawal code instead.
+      reporterId: isAnonymous ? '' : user.uid,
+      reporterName: isAnonymous
+          ? 'Anonymous resident'
+          : user.displayName ?? (await _userName(user.uid)) ?? 'User',
       category: IncidentCategory.fromValue(category),
       subCategory: subCategory,
       priority: IncidentPriority.normal,
@@ -412,6 +422,64 @@ class FirebaseRepository extends IRepository {
       'description': description,
       'updatedAt': DateTime.now(),
     });
+  }
+
+  // ---- Anonymous reporting ----
+  @override
+  Future<WithdrawalCode> issueReportWithdrawalCode({required String incidentId}) async {
+    final uid = fbAuth.currentUser?.uid;
+    if (uid == null) {
+      throw const RepositoryException(
+        RepositoryErrorCode.notSignedIn,
+        'You must be signed in to report.',
+      );
+    }
+    final code = WithdrawalCode.generate();
+    // Only the digest is stored, and it doubles as the document id, so
+    // possession of the code is what authorises a withdrawal.
+    await db.collection('report_access').doc(code.token).set({
+      'incidentId': incidentId,
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+    return code;
+  }
+
+  @override
+  Future<Incident?> findIncidentByWithdrawalCode(String code) async {
+    if (!WithdrawalCode.isWellFormedCode(code)) return null;
+    final token = WithdrawalCode.digest(code);
+    final access =
+        await db.collection('report_access').doc(token).get();
+    if (!access.exists) return null;
+    final incidentId = access.data()?['incidentId'] as String?;
+    if (incidentId == null) return null;
+    final incident = await db.collection('incidents').doc(incidentId).get();
+    if (!incident.exists) return null;
+    return Incident.fromMap(incident.data()!);
+  }
+
+  @override
+  Future<void> withdrawAnonymousReport({
+    required String code,
+    required String incidentId,
+  }) async {
+    // Verification happens server-side: rules cannot check a hash against a
+    // code the client never sends in the clear.
+    try {
+      await _functions.httpsCallable('withdrawAnonymousReport').call<Map>(
+        <String, dynamic>{'code': code, 'incidentId': incidentId},
+      );
+    } on cfn.FirebaseFunctionsException catch (e) {
+      throw RepositoryException(
+        e.code == 'not-found'
+            ? RepositoryErrorCode.notFound
+            : RepositoryErrorCode.permission,
+        e.message ?? 'That code does not match this report.',
+        cause: e,
+      );
+    } catch (e) {
+      throw RepositoryException.from(e);
+    }
   }
 
   @override

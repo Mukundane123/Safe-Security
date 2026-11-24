@@ -1,6 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:safesecurity/models/app_notification.dart';
+import 'package:safesecurity/models/incident.dart';
 import 'package:safesecurity/models/notification_preferences.dart';
+import 'package:safesecurity/models/withdrawal_code.dart';
 import 'package:safesecurity/repositories/demo_repository.dart';
 import 'package:safesecurity/repositories/repository_exception.dart';
 
@@ -142,6 +144,113 @@ void main() {
           incidentId: handled.incidentId,
           description: 'Too late.',
         ),
+        throwsA(isA<RepositoryException>()),
+      );
+    });
+  });
+
+  group('anonymous reporting', () {
+    Future<Incident> fileAnonymous() async {
+      await signIn('citizen@demo.safeguard');
+      return repo.reportIncident(
+        category: 'crime',
+        description: 'Anonymous report.',
+        latitude: 0.3204,
+        longitude: 32.5825,
+        locationLabel: 'Kampala Central',
+        isAnonymous: true,
+      );
+    }
+
+    test('an anonymous report carries no reporter identity', () async {
+      final incident = await fileAnonymous();
+      expect(incident.isAnonymous, isTrue);
+      expect(incident.reporterId, isEmpty);
+      expect(incident.reporterName, 'Anonymous resident');
+
+      // It must not be reachable from the account that filed it.
+      final mine = await repo.watchMyIncidents(repo.currentUser!.userId).first;
+      expect(
+        mine.any((i) => i.incidentId == incident.incidentId),
+        isFalse,
+      );
+    });
+
+    test('the code resolves the report and normalises its separators', () async {
+      final incident = await fileAnonymous();
+      final code = await repo.issueReportWithdrawalCode(
+        incidentId: incident.incidentId,
+      );
+      expect(code.code, matches(RegExp(r'^[A-Z2-9]{4}(-[A-Z2-9]{4}){3}$')));
+
+      // Whatever the reporter types back, the same report is found.
+      final scrambled = code.code.toLowerCase().replaceAll('-', '');
+      final found = await repo.findIncidentByWithdrawalCode(scrambled);
+      expect(found?.incidentId, incident.incidentId);
+    });
+
+    test('re-issuing returns the same code instead of orphaning it', () async {
+      final incident = await fileAnonymous();
+      final first = await repo.issueReportWithdrawalCode(
+        incidentId: incident.incidentId,
+      );
+      final second = await repo.issueReportWithdrawalCode(
+        incidentId: incident.incidentId,
+      );
+      expect(second.token, first.token);
+    });
+
+    test('withdrawing with the code deletes the report', () async {
+      final incident = await fileAnonymous();
+      final code = await repo.issueReportWithdrawalCode(
+        incidentId: incident.incidentId,
+      );
+
+      await repo.withdrawAnonymousReport(
+        code: code.code,
+        incidentId: incident.incidentId,
+      );
+
+      final all = await repo.watchAllIncidents().first;
+      expect(
+        all.any((i) => i.incidentId == incident.incidentId),
+        isFalse,
+      );
+      // The capability is spent, so the code cannot be replayed.
+      expect(await repo.findIncidentByWithdrawalCode(code.code), isNull);
+    });
+
+    test('a wrong code is refused and leaves the report intact', () async {
+      final incident = await fileAnonymous();
+      final code = await repo.issueReportWithdrawalCode(
+        incidentId: incident.incidentId,
+      );
+
+      await expectLater(
+        repo.withdrawAnonymousReport(
+          code: WithdrawalCode.generate().code,
+          incidentId: incident.incidentId,
+        ),
+        throwsA(isA<RepositoryException>()),
+      );
+      expect(
+        (await repo.findIncidentByWithdrawalCode(code.code))?.incidentId,
+        incident.incidentId,
+      );
+    });
+
+    test('a named report is not given a code', () async {
+      await signIn('citizen@demo.safeguard');
+      final incident = await repo.reportIncident(
+        category: 'crime',
+        description: 'Named report.',
+        latitude: 0.3204,
+        longitude: 32.5825,
+        locationLabel: 'Kampala Central',
+      );
+
+      await expectLater(
+        repo.issueReportWithdrawalCode(incidentId: incident.incidentId),
         throwsA(isA<RepositoryException>()),
       );
     });
